@@ -1,5 +1,5 @@
 // receiving.js
-const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext } = SoundComm;
+const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = SoundComm;
 
 (function () {
   // 画面にデバッグログを出力するタイミングを最初に追加

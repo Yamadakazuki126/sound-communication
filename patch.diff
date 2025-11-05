@@ -1,0 +1,132 @@
+diff --git a/receiving.js b/receiving.js
+index 800c199464ad10a49077b3aae26e9e1d5a96aaa5..64a6138f62d4b1fc19901aaea4a7c0daf006277b 100644
+--- a/receiving.js
++++ b/receiving.js
+@@ -29,94 +29,125 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext } = SoundComm;
+   let sampleRate = 44100;
+   let recUrl = null;
+   let stopTimer = null;
+ 
+   function setStatus(msg, cls = "") {
+     statusEl.className = cls || "hint";
+     statusEl.textContent = msg;
+   }
+ 
+   // 音声の正規化
+   function normalizeFloat32(arr) {
+     let sum = 0;
+     for (const v of arr) sum += v * v;
+     const rms = Math.sqrt(sum / arr.length) || 1;
+     const g = 0.5 / rms;
+     const out = new Float32Array(arr.length);
+     for (let i = 0; i < arr.length; i++)
+       out[i] = Math.max(-1, Math.min(1, arr[i] * g));
+     return out;
+   }
+ 
+   // 録音開始処理
+   async function startRecording() {
+     try {
+       debugLog("startRecording: 録音開始");
++
++      // 既存の録音があれば停止してから再開する
++      if (processor || source || mediaStream) {
++        stopRecording();
++      }
++
+       captured = [];
++
+       if (!ctx) {
+         ctx = createAudioContext(44100);
+       }
++
+       await ctx.resume();
+-      sampleRate = ctx.sampleRate;
+-      debugLog("startRecording: MediaStream 確保 OK, sampleRate=" + sampleRate);
+ 
+       mediaStream = await navigator.mediaDevices.getUserMedia({
+         audio: {
+           echoCancellation: false,
+           noiseSuppression: false,
+           autoGainControl: false
+         },
+         video: false
+       });
++
++      sampleRate = ctx.sampleRate;
++      debugLog("startRecording: MediaStream 確保 OK, sampleRate=" + sampleRate);
++
+       source = ctx.createMediaStreamSource(mediaStream);
+ 
+       const bufferSize = 2048;
+       processor = ctx.createScriptProcessor(bufferSize, 1, 1);
+       processor.onaudioprocess = (e) => {
+         captured.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+       };
+ 
+       source.connect(processor);
+       processor.connect(ctx.destination);
+ 
+       const secs = Math.max(1, Math.min(20, Number(secsEl.value) || 4));
+       setStatus(`録音中…（${secs}秒）`, "ok");
+       startBtn.disabled = true;
+       stopBtn.disabled = false;
+       decodeBtn.disabled = true;
+ 
+       if (stopTimer) {
+         clearTimeout(stopTimer);
+         stopTimer = null;
+       }
+       stopTimer = setTimeout(() => {
+         stopTimer = null;
+         stopRecording();
+       }, secs * 1000);
+     } catch (err) {
+       debugLog("startRecording: エラー", err);
+       console.error(err);
++
++      if (mediaStream) {
++        mediaStream.getTracks().forEach((t) => t.stop());
++        mediaStream = null;
++      }
++
++      if (processor) {
++        processor.disconnect();
++        processor.onaudioprocess = null;
++        processor = null;
++      }
++
++      if (source) {
++        source.disconnect();
++        source = null;
++      }
++
++      startBtn.disabled = false;
++      stopBtn.disabled = true;
++      decodeBtn.disabled = captured.length === 0;
++
+       setStatus(
+         "マイク取得に失敗しました。HTTPSと権限を確認してください。",
+         "err"
+       );
+     }
+   }
+ 
+   // 録音停止処理
+   function stopRecording() {
+     debugLog("stopRecording: 呼び出し, チャンク数=" + captured.length);
+     if (processor) {
+       processor.disconnect();
+       processor.onaudioprocess = null;
+       processor = null;
+     }
+     if (source) {
+       source.disconnect();
+       source = null;
+     }
+     if (mediaStream) {
+       mediaStream.getTracks().forEach((t) => t.stop());
+       mediaStream = null;
+     }
+     if (stopTimer) {
+       clearTimeout(stopTimer);

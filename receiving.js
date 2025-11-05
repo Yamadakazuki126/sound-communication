@@ -51,13 +51,19 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext } = SoundComm;
   async function startRecording() {
     try {
       debugLog("startRecording: 録音開始");
+
+      // 既存の録音があれば停止してから再開する
+      if (processor || source || mediaStream) {
+        stopRecording();
+      }
+
       captured = [];
+
       if (!ctx) {
         ctx = createAudioContext(44100);
       }
+
       await ctx.resume();
-      sampleRate = ctx.sampleRate;
-      debugLog("startRecording: MediaStream 確保 OK, sampleRate=" + sampleRate);
 
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -67,6 +73,10 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext } = SoundComm;
         },
         video: false
       });
+
+      sampleRate = ctx.sampleRate;
+      debugLog("startRecording: MediaStream 確保 OK, sampleRate=" + sampleRate);
+
       source = ctx.createMediaStreamSource(mediaStream);
 
       const bufferSize = 2048;
@@ -95,6 +105,27 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext } = SoundComm;
     } catch (err) {
       debugLog("startRecording: エラー", err);
       console.error(err);
+
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+        mediaStream = null;
+      }
+
+      if (processor) {
+        processor.disconnect();
+        processor.onaudioprocess = null;
+        processor = null;
+      }
+
+      if (source) {
+        source.disconnect();
+        source = null;
+      }
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      decodeBtn.disabled = captured.length === 0;
+
       setStatus(
         "マイク取得に失敗しました。HTTPSと権限を確認してください。",
         "err"

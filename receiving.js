@@ -7,7 +7,6 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
 
   const startBtn = document.getElementById("start");
   const stopBtn = document.getElementById("stop");
-  const decodeBtn = document.getElementById("decode");
   const statusEl = document.getElementById("status");
   const resultEl = document.getElementById("result");
   const hiraEl = document.getElementById("decodedHira");
@@ -92,7 +91,6 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
       setStatus(`録音中…（${secs}秒）`, "ok");
       startBtn.disabled = true;
       stopBtn.disabled = false;
-      decodeBtn.disabled = true;
 
       if (stopTimer) {
         clearTimeout(stopTimer);
@@ -124,7 +122,6 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
 
       startBtn.disabled = false;
       stopBtn.disabled = true;
-      decodeBtn.disabled = captured.length === 0;
 
       setStatus(
         "マイク取得に失敗しました。HTTPSと権限を確認してください。",
@@ -173,8 +170,13 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
 
     startBtn.disabled = false;
     stopBtn.disabled = true;
-    decodeBtn.disabled = false;
-    setStatus("録音完了。解析できます。", "ok");
+
+    if (captured.length) {
+      setStatus("録音停止。解析を開始します…", "hint");
+      decodeNow();
+    } else {
+      setStatus("録音データがありません。", "err");
+    }
   }
 
   // 解析処理（復調）
@@ -238,5 +240,4 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
 
   startBtn.addEventListener("click", startRecording);
   stopBtn.addEventListener("click", stopRecording);
-  decodeBtn.addEventListener("click", decodeNow);
 })();

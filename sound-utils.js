@@ -466,6 +466,15 @@
       frames.push(finalResult);
     }
 
+    // ★ フレームが1つも完成していない場合でも、
+    //    プリンブル検出後に溜まったビットがあればそれを返すフォールバック
+    if (frames.length === 0 && state.bitBuffer && state.bitBuffer.length > 0) {
+      debugLog(
+        `demodFSK: no complete frame, fallback with partial bits len=${state.bitBuffer.length}`
+      );
+      frames.push(state.bitBuffer.slice());
+    }
+
     const flattened = [];
     for (const frame of frames) {
       for (const bit of frame) {

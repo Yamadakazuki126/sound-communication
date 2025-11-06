@@ -80,6 +80,35 @@
     }
   }
 
+  // sending.js の buildPreamble と同じく、1010... の交互ビット列を生成する。
+  function buildPreambleBits(bitRate, seconds) {
+    const sec = Math.max(0, Number(seconds) || 0);
+    const bits = Math.max(0, Math.round(sec * bitRate));
+    const pattern = [];
+    for (let i = 0; i < bits; i++) {
+      pattern.push(i % 2 === 0 ? 1 : 0);
+    }
+    return pattern;
+  }
+
+  function buildPrefixTable(pattern) {
+    if (!pattern || pattern.length === 0) {
+      return [];
+    }
+    const table = new Array(pattern.length).fill(0);
+    let j = 0;
+    for (let i = 1; i < pattern.length; i++) {
+      while (j > 0 && pattern[i] !== pattern[j]) {
+        j = table[j - 1];
+      }
+      if (pattern[i] === pattern[j]) {
+        j++;
+      }
+      table[i] = j;
+    }
+    return table;
+  }
+
   // ストリーミング復調時の状態を保持するためのクラス。
   //
   //  - buffer:     まだ解析していない生PCMデータ。
@@ -107,18 +136,34 @@
       this.usePre = usePre;
       this.preSec = preSec;
 
-      this.buffer = new Float32Array(0);
-      this.bitBuffer = [];
-      this.inFrame = false;
+      const preSecPositive = Math.max(0, Number(preSec) || 0);
 
       this.samplesPerBit = Math.max(1, Math.round(fs / br));
       this.invFs = 1 / fs;
       this.twoPi = 2 * Math.PI;
 
-      this.skipSamplesRemaining = usePre && preSec > 0
-        ? Math.floor(preSec * fs)
-        : 0;
+      const preambleDurationSec = usePre ? preSecPositive : 0;
+      this.preambleBits = buildPreambleBits(br, preambleDurationSec);
+      this.preambleTable = buildPrefixTable(this.preambleBits);
+      this.preambleLength = this.preambleBits.length;
+      this.preambleMatchIndex = 0;
+      this.preambleDetected = this.preambleLength === 0;
+
+      const legacySkipSec = this.preambleLength === 0 ? preSecPositive : 0;
+      this.skipSamplesRemaining = legacySkipSec
+        ? Math.floor(legacySkipSec * fs)
+        : 0; // レガシー互換のための時間スキップ。プリンブル同期を推奨。
+
+      this.buffer = new Float32Array(0);
+      this.bitBuffer = [];
+      this.inFrame = this.preambleDetected && this.skipSamplesRemaining === 0;
+
       this.samplesProcessed = 0; // これまで破棄済みサンプル数
+
+      // 正規化用のランニングRMS。
+      this.targetRms = 0.5;
+      this.rmsAlpha = 0.05;
+      this.runningPower = null;
     }
   }
 
@@ -135,24 +180,65 @@
     return out;
   }
 
-  function normalizeBuffer(buf) {
-    const out = new Float32Array(buf.length);
-    if (buf.length === 0) return out;
+  function normalizeChunk(chunk, state) {
+    const len = chunk ? chunk.length : 0;
+    if (!len) {
+      return new Float32Array(0);
+    }
 
     let sum = 0;
-    for (let i = 0; i < buf.length; i++) {
-      const v = buf[i];
+    for (let i = 0; i < len; i++) {
+      const v = chunk[i];
       sum += v * v;
     }
-    const rms = Math.sqrt(sum / buf.length) || 1;
-    const g = 0.5 / rms;
-    for (let i = 0; i < buf.length; i++) {
-      let v = buf[i] * g;
+
+    const power = sum / len;
+    if (state.runningPower == null) {
+      state.runningPower = power;
+    } else {
+      state.runningPower =
+        (1 - state.rmsAlpha) * state.runningPower + state.rmsAlpha * power;
+    }
+
+    const rms = Math.sqrt(state.runningPower) || 1;
+    const gain = state.targetRms / rms;
+
+    const out = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      let v = chunk[i] * gain;
       if (v > 1) v = 1;
       if (v < -1) v = -1;
       out[i] = v;
     }
     return out;
+  }
+
+  // 交互ビットのプリンブルを KMP で追跡し、開始合図を検出する。
+  function advancePreambleMatch(state, bit) {
+    if (!state || state.preambleLength === 0) {
+      state.preambleDetected = true;
+      state.inFrame = true;
+      return false;
+    }
+
+    let idx = state.preambleMatchIndex;
+    while (idx > 0 && bit !== state.preambleBits[idx]) {
+      idx = state.preambleTable[idx - 1];
+    }
+
+    if (bit === state.preambleBits[idx]) {
+      idx += 1;
+      if (idx === state.preambleLength) {
+        state.preambleDetected = true;
+        state.inFrame = true;
+        state.bitBuffer = [];
+        state.preambleMatchIndex = state.preambleTable[idx - 1] || 0;
+        return true; // プリンブルを検出。現在のビットはプリンブルに含まれる。
+      }
+    }
+
+    state.preambleMatchIndex = idx;
+    return false;
   }
 
   // 小さなPCMチャンクを受け取り、状態を更新しながら復調する。
@@ -163,15 +249,14 @@
     }
 
     const chunk = pcmChunk && pcmChunk.length ? pcmChunk : new Float32Array(0);
-    const combined = appendFloat32Buffers(state.buffer, chunk);
+    const normalizedChunk = chunk.length ? normalizeChunk(chunk, state) : chunk;
+    const combined = appendFloat32Buffers(state.buffer, normalizedChunk);
     const baseSampleOffset = state.samplesProcessed;
 
     if (combined.length === 0) {
       state.buffer = combined;
       return null;
     }
-
-    const normalized = normalizeBuffer(combined);
 
     let idx = 0;
 
@@ -188,14 +273,8 @@
       }
     }
 
-    if (!state.inFrame && state.skipSamplesRemaining === 0) {
+    if (!state.inFrame && state.skipSamplesRemaining === 0 && state.preambleLength === 0) {
       state.inFrame = true;
-    }
-
-    if (!state.inFrame) {
-      state.samplesProcessed = baseSampleOffset + idx;
-      state.buffer = combined.slice(idx);
-      return null;
     }
 
     const samplesPerBit = state.samplesPerBit;
@@ -204,13 +283,13 @@
 
     let bitsCompleted = null;
 
-    while (idx + samplesPerBit <= normalized.length) {
+    while (idx + samplesPerBit <= combined.length) {
       let c0 = 0, s0 = 0;
       let c1 = 0, s1 = 0;
 
       for (let n = 0; n < samplesPerBit; n++) {
         const sampleIdx = idx + n;
-        const sample = normalized[sampleIdx];
+        const sample = combined[sampleIdx];
         const absoluteIdx = baseSampleOffset + sampleIdx;
         const t = absoluteIdx * invFs;
 
@@ -241,8 +320,20 @@
         bit = p1 >= p0 ? 1 : 0;
       }
 
-      state.bitBuffer.push(bit);
       idx += samplesPerBit;
+
+      if (!state.inFrame) {
+        const detected = advancePreambleMatch(state, bit);
+        if (!state.inFrame) {
+          continue;
+        }
+        if (detected) {
+          // 検出に使用したビットはプリンブルの一部なので次のビットから格納する。
+          continue;
+        }
+      }
+
+      state.bitBuffer.push(bit);
 
       if (
         state.expectedLength != null &&
@@ -252,6 +343,8 @@
         state.bitBuffer = state.bitBuffer.slice(state.expectedLength);
         state.inFrame = false;
         state.expectedLength = null;
+        state.preambleDetected = state.preambleLength === 0;
+        state.preambleMatchIndex = 0;
         bitsCompleted = complete;
         break;
       }
@@ -274,13 +367,23 @@
     return bitsCompleted;
   }
 
+  // demodFSK は単一のPCMバッファから 1 フレーム分のビット列を復調するヘルパーです。
+  // ストリーミングで複数フレームを扱う場合は demodFSKChunk と FSKDemodState を用いて
+  // 上位レイヤーでフレーム境界を管理してください。
   function demodFSK(raw, fs, br, f0, f1, bitsExpected, usePre, th, preSec) {
     debugLog(
       `demodFSK: fs=${fs}, br=${br}, f0=${f0}, f1=${f1}, len=${raw.length}`
     );
 
     const samplesPerBit = Math.max(1, Math.round(fs / br));
-    const start = usePre && preSec > 0 ? Math.min(raw.length, Math.floor(preSec * fs)) : 0;
+    const preSecPositive = Math.max(0, Number(preSec) || 0);
+    const preambleBitsCount = usePre
+      ? Math.max(0, Math.round(preSecPositive * br))
+      : 0;
+    const legacySkip = preambleBitsCount === 0 && preSecPositive > 0; // 時間スキップは後方互換用
+    const start = legacySkip
+      ? Math.min(raw.length, Math.floor(preSecPositive * fs))
+      : 0;
     const maxBits = Math.floor((raw.length - start) / samplesPerBit);
     const totalBits = bitsExpected ? Math.min(bitsExpected, maxBits) : maxBits;
 
@@ -299,7 +402,7 @@
       preSec
     });
 
-    // start に達するまではサンプルを空読みしてスキップする
+    // start に達するまではサンプルを空読みしてスキップする（後方互換用の挙動）
     if (start > 0) {
       state.skipSamplesRemaining = start;
     }

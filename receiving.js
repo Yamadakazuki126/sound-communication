@@ -1,5 +1,13 @@
 // receiving.js
-const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = SoundComm;
+const {
+  debugLog,
+  pcmToWavBlob,
+  concatFloat32,
+  createAudioContext,
+  demodFSK,
+  FSKDemodState,
+  demodFSKChunk
+} = SoundComm;
 
 (function () {
   // 画面にデバッグログを出力するタイミングを最初に追加
@@ -13,6 +21,7 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
   const logEl = document.getElementById("log");
   const useHammingRxEl = document.getElementById("useHammingRx");
   const recPlayer = document.getElementById("recPlayer");
+  const recvTextEl = document.getElementById("recvText");
 
   const brEl = document.getElementById("br");
   const f0El = document.getElementById("f0");
@@ -29,6 +38,10 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
   let recUrl = null;
   let stopTimer = null;
 
+  let streamingDemodState = null;
+  let streamingPendingBits = "";
+  let streamingDecodedText = "";
+
   function setStatus(msg, cls = "") {
     statusEl.className = cls || "hint";
     statusEl.textContent = msg;
@@ -44,6 +57,56 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
     for (let i = 0; i < arr.length; i++)
       out[i] = Math.max(-1, Math.min(1, arr[i] * g));
     return out;
+  }
+
+  function bitsToText(bitString) {
+    const rawBits = bitString || "";
+    const useHamming = useHammingRxEl.checked;
+
+    let dataBits = rawBits;
+    let decodableRawBits = rawBits;
+
+    if (useHamming) {
+      const usableLength = Math.floor(rawBits.length / 14) * 14;
+      decodableRawBits = rawBits.slice(0, usableLength);
+      dataBits = HammingCodec.decode(decodableRawBits);
+    } else {
+      const usableLength = Math.floor(rawBits.length / 8) * 8;
+      decodableRawBits = rawBits.slice(0, usableLength);
+      dataBits = rawBits;
+    }
+
+    const textSourceBits = useHamming ? dataBits : decodableRawBits;
+    const text = window.KanaCodec.bitsToHiragana(textSourceBits || "") || "";
+
+    return {
+      rawBits,
+      dataBits,
+      text,
+      consumedRawBits: decodableRawBits.length
+    };
+  }
+
+  function handleStreamingBits(bitStr) {
+    if (!bitStr) {
+      return;
+    }
+
+    streamingPendingBits += bitStr;
+
+    const { text } = bitsToText(streamingPendingBits);
+    const nextText = text || "";
+
+    if (nextText.startsWith(streamingDecodedText)) {
+      const newPart = nextText.slice(streamingDecodedText.length);
+      if (newPart && recvTextEl) {
+        recvTextEl.textContent += newPart;
+      }
+    } else if (recvTextEl) {
+      recvTextEl.textContent = nextText;
+    }
+
+    streamingDecodedText = nextText;
   }
 
   // 録音開始処理
@@ -76,12 +139,45 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
       sampleRate = ctx.sampleRate;
       debugLog("startRecording: MediaStream 確保 OK, sampleRate=" + sampleRate);
 
+      const fs = sampleRate;
+      const br = Number(brEl.value) || 30;
+      const f0 = Number(f0El.value) || 1400;
+      const f1 = Number(f1El.value) || 2200;
+      const usePre = usePreambleEl.checked;
+      const preSec = Number(preSecEl.value) || 0;
+      const th = Number(thEl.value) || 1.4;
+
+      streamingDemodState = new FSKDemodState({
+        fs,
+        br,
+        f0,
+        f1,
+        threshold: th,
+        expectedLength: null,
+        usePre,
+        preSec
+      });
+      streamingPendingBits = "";
+      streamingDecodedText = "";
+      if (recvTextEl) {
+        recvTextEl.textContent = "";
+      }
+
       source = ctx.createMediaStreamSource(mediaStream);
 
       const bufferSize = 2048;
       processor = ctx.createScriptProcessor(bufferSize, 1, 1);
       processor.onaudioprocess = (e) => {
-        captured.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        const chunk = new Float32Array(e.inputBuffer.getChannelData(0));
+        captured.push(chunk);
+
+        if (streamingDemodState) {
+          const bitsArray = demodFSKChunk(chunk, streamingDemodState);
+          if (bitsArray && bitsArray.length) {
+            const bitStr = bitsArray.map((b) => (b ? "1" : "0")).join("");
+            handleStreamingBits(bitStr);
+          }
+        }
       };
 
       source.connect(processor);
@@ -118,6 +214,13 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
       if (source) {
         source.disconnect();
         source = null;
+      }
+
+      streamingDemodState = null;
+      streamingPendingBits = "";
+      streamingDecodedText = "";
+      if (recvTextEl) {
+        recvTextEl.textContent = "";
       }
 
       startBtn.disabled = false;
@@ -214,18 +317,12 @@ const { debugLog, pcmToWavBlob, concatFloat32, createAudioContext, demodFSK } = 
     const t1 = performance.now();
 
     const rawBits = out.bits || "";
-    let dataBits = rawBits;
-
-    // Hammingを使う場合はここで復号（14bit→8bit）
-    if (useHammingRxEl.checked) {
-      dataBits = HammingCodec.decode(rawBits);
-    }
+    const { dataBits, text } = bitsToText(rawBits);
 
     resultEl.textContent = dataBits || "(空)";
 
-    // ひらがなデコード
-    hiraEl.textContent =
-      window.KanaCodec.bitsToHiragana(dataBits || "") || "(デコード結果なし)";
+    const hiraText = text || "";
+    hiraEl.textContent = hiraText || "(デコード結果なし)";
 
     setStatus(
       `解析完了（${(t1 - t0).toFixed(1)} ms, 生=${rawBits.length}bit / データ=${dataBits.length}bit）`,

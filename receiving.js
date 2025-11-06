@@ -88,13 +88,11 @@ const {
   }
 
   function handleStreamingBits(bitStr) {
-    if (!bitStr) {
-      return;
-    }
+    if (!bitStr) return;
 
     streamingPendingBits += bitStr;
 
-    const { text } = bitsToText(streamingPendingBits);
+    const { text, consumedRawBits } = bitsToText(streamingPendingBits);
     const nextText = text || "";
 
     if (nextText.startsWith(streamingDecodedText)) {
@@ -107,6 +105,11 @@ const {
     }
 
     streamingDecodedText = nextText;
+
+    // 使い終わったぶんの生ビットは pending から削る（Hamming の14bit境界など用）
+    if (consumedRawBits > 0) {
+      streamingPendingBits = streamingPendingBits.slice(consumedRawBits);
+    }
   }
 
   // 録音開始処理

@@ -248,10 +248,12 @@
     return false;
   }
   
-  // 小さなPCMチャンクを受け取り、状態を更新しながら復調する。
-  // フレームが完成すると number[] で返し、未完了なら null を返す。
     // 小さなPCMチャンクを受け取り、状態を更新しながら復調する。
-  // フレームが完成すると number[] で返し、未完了なら null を返す。
+  // 戻り値の仕様：
+  //  - expectedLength != null の場合：
+  //      → そのフレームぶんのビット配列（number[]）を返す（または null）
+  //  - expectedLength == null の場合：
+  //      → この呼び出しで「新たに確定したビット」だけを number[] で返す（または null）
   function demodFSKChunk(pcmChunk, state) {
     if (!state) {
       throw new Error("demodFSKChunk requires a valid FSKDemodState");
@@ -274,7 +276,6 @@
       idx = skip;
       state.skipSamplesRemaining -= skip;
       if (state.skipSamplesRemaining > 0) {
-        // まだフレーム開始前。スキップ分だけ破棄して終了。
         const consumed = idx;
         state.samplesProcessed = baseSampleOffset + consumed;
         state.buffer = combined.slice(consumed);
@@ -291,6 +292,7 @@
     const TWO_PI = state.twoPi;
 
     let bitsCompleted = null;
+    const newBits = []; // ★ この呼び出しで新しく確定したビット
 
     while (idx + samplesPerBit <= combined.length) {
       let c0 = 0, s0 = 0;
@@ -329,33 +331,24 @@
         bit = p1 >= p0 ? 1 : 0;
       }
 
-      // ★ デバッグ: プリンブル検出前の先頭ビットを覗く
-      if (!state.inFrame && state.preambleLength > 0) {
-        if (!state._debugFirstBits) state._debugFirstBits = "";
-        if (state._debugFirstBits.length < 80) {
-          state._debugFirstBits += bit ? "1" : "0";
-          if (state._debugFirstBits.length === 80) {
-            debugLog(
-              `demodFSKChunk: first bits(before preamble detect)=${state._debugFirstBits}`
-            );
-          }
-        }
-      }
-
       idx += samplesPerBit;
 
+      // プリンブル検出前なら、まずはKMPに食わせるだけ
       if (!state.inFrame) {
         const detected = advancePreambleMatch(state, bit);
         if (!state.inFrame) {
           continue;
         }
         if (detected) {
-          // 検出に使用したビットはプリンブルの一部なので次のビットから格納する。
+          // 検出されたビットはプリンブルの一部なので、
+          // データビットとしては積まずに次のビットから格納する
           continue;
         }
       }
 
+      // ここに来たビットは「有効データビット」
       state.bitBuffer.push(bit);
+      newBits.push(bit);
 
       if (
         state.expectedLength != null &&
@@ -377,7 +370,6 @@
     state.buffer = combined.slice(consumed);
 
     if (!state.inFrame && state.bitBuffer.length === 0) {
-      // フレーム外のノイズが溜まりすぎないように古い部分を間引く
       const maxKeep = state.samplesPerBit * 8;
       if (state.buffer.length > maxKeep) {
         const trim = state.buffer.length - maxKeep;
@@ -386,8 +378,19 @@
       }
     }
 
-    return bitsCompleted;
+    // ★ 戻り値の優先順位：
+    //  1. expectedLength が設定されていてフレームが完成した場合 → そのフレーム
+    //  2. そうでなければ、この呼び出しで新しく得られたビット列
+    //  3. 何もなければ null
+    if (bitsCompleted && bitsCompleted.length) {
+      return bitsCompleted;
+    }
+    if (newBits.length) {
+      return newBits;
+    }
+    return null;
   }
+
 
   // demodFSK は単一のPCMバッファから 1 フレーム分のビット列を復調するヘルパーです。
   // ストリーミングで複数フレームを扱う場合は demodFSKChunk と FSKDemodState を用いて
